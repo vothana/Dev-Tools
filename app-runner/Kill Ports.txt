@@ -1,0 +1,19 @@
+netstat -ano | findstr :3000
+
+
+for /f "tokens=5" %p in ('netstat -a -n -o ^| findstr :3000') do taskkill /PID %p /F
+
+
+
+pyinstaller --onefile --windowed --icon=PROFILE_PIC.ico --add-data "PROFILE_PIC.ico;." --hidden-import=PyQt5.QtCore --hidden-import=PyQt5.QtGui --hidden-import=PyQt5.QtWidgets main.py
+
+
+
+$env:Path += ";D:\window\flutter_windows_3.29.3-stable\flutter\bin"
+
+
+set PATH=D:\window\nvm;%PATH% 
+
+set PATH=D:\window\nvm\v18.20.3;%PATH%
+
+yarn dev

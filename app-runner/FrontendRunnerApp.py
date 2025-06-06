@@ -1,0 +1,1001 @@
+import os
+import sys
+import json
+import ctypes
+import subprocess
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
+                             QLabel, QComboBox, QPushButton, QTextEdit, QLineEdit, 
+                             QFileDialog, QCheckBox, QMessageBox, QCompleter, QMenu,QAction )
+from PyQt5.QtCore import QProcess, QTextStream, Qt, QSettings, QProcessEnvironment, QStringListModel,QTimer
+from PyQt5.QtGui import QTextCursor, QFont, QTextCharFormat, QColor, QTextCursor, QIcon
+
+class FrontendRunnerTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        
+        # Main layout for the tab itself
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Create central widget for our content
+        self.main_widget = QWidget()
+        self.widget_layout = QVBoxLayout(self.main_widget)
+        self.widget_layout.setSpacing(10)
+        
+        # Add to main layout
+        self.main_layout.addWidget(self.main_widget)
+        
+        # Initialize console but yet add to widget
+        self.create_console_output()
+        self.load_config()
+
+        # Initialize UI
+        self.init_ui()
+        
+    def init_ui(self):
+        """Initialize all UI components"""
+        # Clear any existing widgets
+        while self.widget_layout.count():
+            item = self.widget_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # Create UI sections
+        self.create_project_selection()
+        self.create_node_selection()
+        self.create_command_selection()
+        self.create_action_buttons()
+              
+        self.widget_layout.addWidget(self.console_output)
+        self.widget_layout.addWidget(self.command_input)
+        
+        # Load data
+        self.load_projects()
+        self.load_node_versions()
+    
+    def get_resource_path(self, relative_path):
+        """Get absolute path to resource"""
+        try:
+            # PyInstaller creates a temp folder and stores path in _MEIPASS
+            base_path = sys._MEIPASS
+        except Exception:
+            base_path = os.path.abspath(".")
+        
+        return os.path.join(base_path, relative_path)
+    
+    def get_project_path(self, project_path_text):
+        if not project_path_text:
+            return
+        
+        # Extract path from "name=path" format
+        if '=' in project_path_text:
+            _, path = project_path_text.split('=', 1)
+        else:
+            path = project_path_text
+        
+        return path
+
+    def load_config(self):
+        """Load configuration with proper path handling"""
+        # Get the directory where the executable or script is running from
+        if getattr(sys, 'frozen', False):
+            # Running as compiled executable
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            # Running as script
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Set config file path
+        self.config_json_path = os.path.join(base_dir, "config.json")
+        
+        # Default configuration
+        self.config = {
+            "NVM_DIR": "D:\\window\\nvm",
+            "DEFAULT_PROJECT_DIR": "D:\\front",
+            "RUNNER_COMMANDS": [
+                "yarn dev", 
+                "npm run dev", 
+                "npm run serve", 
+                "yarn start", 
+                "npm start"
+            ],
+            "SERVICES": []
+        }
+        
+        try:
+            # Create config file if it doesn't exist
+            if not os.path.exists(self.config_json_path):
+                with open(self.config_json_path, "w") as f:
+                    json.dump(self.config, f, indent=4)
+                self.append_console(f"Created new config file at {self.config_json_path}")
+            else:
+                # Load from existing config file
+                with open(self.config_json_path, "r") as f:
+                    file_config = json.load(f)
+                    # Merge with defaults (preserve any existing settings)
+                    self.config.update(file_config)
+                    
+        except Exception as e:
+            error_msg = f"Error loading config: {str(e)}"
+            self.append_console(error_msg)
+            QMessageBox.warning(self, "Config Error", error_msg)
+            
+            # Try to create fresh config if loading failed
+            try:
+                with open(self.config_json_path, "w") as f:
+                    json.dump(self.config, f, indent=4)
+                self.append_console("Created fresh config file due to load error")
+            except Exception as e:
+                critical_msg = f"Failed to create config file: {str(e)}"
+                self.append_console(critical_msg)
+                QMessageBox.critical(self, "Config Error", critical_msg)
+        
+        # Ensure required directories exist
+        os.makedirs(self.config["NVM_DIR"], exist_ok=True)
+        os.makedirs(self.config["DEFAULT_PROJECT_DIR"], exist_ok=True)
+    
+    def save_config(self):
+        with open(self.config_json_path, "w") as f:
+            json.dump(self.config, f, indent=4)
+
+        # Also save to QSettings
+        self.settings.setValue("NVM_DIR", self.config["NVM_DIR"])
+        self.settings.setValue("DEFAULT_PROJECT_DIR", self.config["DEFAULT_PROJECT_DIR"])
+        self.settings.setValue("RUNNER_COMMANDS", json.dumps(self.config["RUNNER_COMMANDS"]))
+
+    def create_project_selection(self):
+        project_layout = QHBoxLayout()
+        
+        project_label = QLabel("Project:")
+        self.project_combo = QComboBox()
+        self.project_combo.setEditable(True)
+        
+        # Set up auto-completion
+        completer = QCompleter()
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        self.project_combo.setCompleter(completer)
+        
+        # Load projects from config
+        self.load_projects_from_config()
+        
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self.browse_project)
+        
+        # Create three-dot menu button
+        menu_button = QPushButton("⋯")  # Using vertical ellipsis character
+        menu_button.setFixedWidth(30)
+        
+        # Create menu for the three-dot button
+        self.menu = QMenu()
+        
+        # Add actions to menu
+        self.config_action = QAction("Add to config", self)
+        self.config_action.triggered.connect(self.register_project_to_config)
+        self.menu.addAction(self.config_action)
+        
+        self.explorer_action = QAction("Open in Explorer", self)
+        self.explorer_action.triggered.connect(self.open_project_in_explorer)
+        self.menu.addAction(self.explorer_action)
+
+         # Add separator
+        self.menu.addSeparator()
+        
+        # Add Edit Config action
+        self.edit_config_action = QAction("Edit Config", self)
+        self.edit_config_action.triggered.connect(self.open_config_in_editor)
+        self.menu.addAction(self.edit_config_action)
+        
+        menu_button.setMenu(self.menu)
+        
+        # Connect signals
+        self.project_combo.currentTextChanged.connect(self.update_fields_from_project)
+        self.project_combo.currentTextChanged.connect(self.update_config_button_state)
+        
+        project_layout.addWidget(project_label)
+        project_layout.addWidget(self.project_combo)
+        project_layout.addWidget(browse_button)
+        project_layout.addWidget(menu_button)
+        
+        self.widget_layout.addLayout(project_layout)
+
+    def load_projects_from_config(self):
+        """Load projects from config.json SERVICES section"""
+        try:
+            with open(self.config_json_path, 'r') as f:
+                config = json.load(f)
+                services = config.get('SERVICES', [])
+                
+                self.project_combo.clear()
+                self.projects_config = {}  # Store project configs for reference
+                
+                for service in services:
+                    name = service.get('SERVICE_NAME', '')
+                    path = service.get('SERVICE_DIR', '')
+                    if name and path:
+                        self.project_combo.addItem(f"{name}={path}")
+                        self.projects_config[f"{name} ({path})"] = service
+                
+                # Update completer model
+                model = QStringListModel([self.project_combo.itemText(i) for i in range(self.project_combo.count())])
+                self.project_combo.completer().setModel(model)
+                
+        except Exception as e:
+            print(f"Error loading projects from config: {str(e)}")
+
+    def update_fields_from_project(self, project_text):
+        """Update other fields when project is selected"""
+        if not hasattr(self, 'projects_config') or project_text not in self.projects_config:
+            return
+        
+        config = self.projects_config[project_text]
+        
+        # Update Node version
+        node_version = f"v{config.get('NODE_VERSION', '')}"
+        index = self.node_combo.findText(node_version)
+        if index >= 0:
+            self.node_combo.setCurrentIndex(index)
+        
+        # Update run command
+        run_command = config.get('RUN_COMMAND', '')
+        index = self.command_combo.findText(run_command)
+        if index >= 0:
+            self.command_combo.setCurrentIndex(index)
+        elif run_command:  # Add if not exists
+            self.command_combo.addItem(run_command)
+            self.command_combo.setCurrentIndex(self.command_combo.count() - 1)
+        
+        # Update npm install checkbox
+        self.install_checkbox.setChecked(config.get('NMP_INSTALL', False))
+
+    def browse_project(self):
+        """Browse for project directory and add to config"""
+        default_dir = self.config.get("DEFAULT_PROJECT_DIR", "D:\\front")
+        folder = QFileDialog.getExistingDirectory(self, "Select Project Directory", default_dir)
+        
+        if folder:
+            # Add to combo if not already present
+            project_name = os.path.basename(folder)
+            display_text = f"{project_name} ({folder})"
+            
+            if self.project_combo.findText(display_text) == -1:
+                self.project_combo.addItem(display_text)
+                # Update completer model
+                model = QStringListModel([self.project_combo.itemText(i) for i in range(self.project_combo.count())])
+                self.project_combo.completer().setModel(model)
+            
+            self.project_combo.setCurrentText(display_text)
+    
+    def update_config_button_state(self):
+        """Update the config button text based on whether project exists in config"""
+        project_text = self.project_combo.currentText()
+        if not project_text:
+            return
+        
+        # Extract path from "name=path" format
+        path = self.get_project_path(project_text)
+        
+        # Check if project exists in config
+        project_exists = any(
+            service.get('SERVICE_DIR') == path
+            for service in self.config.get('SERVICES', [])
+        )
+        
+        self.config_action.setText("Update" if project_exists else "Add to config")
+
+    def register_project_to_config(self):
+        """Register or update the current project in config.json"""
+        project_text = self.project_combo.currentText()
+        if not project_text:
+            QMessageBox.warning(self, "Error", "No project selected")
+            return
+        
+        # Extract name and path from "name=path" format or use basename
+        if '=' in project_text:
+            path = self.get_project_path(project_text)
+            name = os.path.basename(path)
+        else:
+            path = project_text
+            name = os.path.basename(path)
+        
+        if not os.path.exists(path):
+            QMessageBox.warning(self, "Error", "Invalid project directory")
+            return
+        
+        # Get current values from UI
+        node_version = self.node_combo.currentText().replace('v', '')
+        run_command = self.command_combo.currentText()
+        npm_install = self.install_checkbox.isChecked()
+        
+        # Create or update service entry
+        service_entry = {
+            'SERVICE_NAME': name,
+            'SERVICE_DIR': path,
+            'NODE_VERSION': node_version,
+            'RUN_COMMAND': run_command,
+            'NPM_INSTALL': npm_install
+        }
+        
+        # Update config
+        services = self.config.get('SERVICES', [])
+        
+        # Check if project already exists
+        existing_index = next(
+            (i for i, s in enumerate(services) 
+            if s.get('SERVICE_DIR') == path),
+            -1
+        )
+        
+        if existing_index >= 0:
+            services[existing_index] = service_entry
+            action = "updated"
+        else:
+            services.append(service_entry)
+            action = "added"
+        
+        self.config['SERVICES'] = services
+        
+        # Save to file
+        try:
+            with open(self.config_json_path, 'w') as f:
+                json.dump(self.config, f, indent=4)
+            
+            self.append_console(f"Project {action} to config.json")
+            self.load_projects_from_config()  # Refresh the project list
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save config: {str(e)}")
+
+    def open_project_in_explorer(self):
+        """Open File Explorer at the project directory"""
+        project_text = self.project_combo.currentText()
+        if not project_text:
+            QMessageBox.warning(self, "Error", "No project selected")
+            return
+        
+        # Extract path from "name=path" format or use as-is
+        path = self.get_project_path(project_text)
+        
+        if not os.path.exists(path):
+            QMessageBox.warning(self, "Error", "Invalid project directory")
+            return
+        
+        try:
+            if sys.platform == 'win32':
+                os.startfile(path)
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', path])
+            else:
+                subprocess.Popen(['xdg-open', path])
+                
+            self.append_console(f"Opened project in file explorer: {path}")
+        except Exception as e:
+            self.append_console(f"Failed to open explorer: {str(e)}")
+            QMessageBox.warning(self, "Error", f"Could not open file explorer:\n{str(e)}")
+
+    def open_config_in_editor(self):
+        """Open config.json in preferred editor (VS Code if available, else Notepad)"""
+        try:
+            config_path = os.path.abspath('config.json')
+            if not os.path.exists(config_path):
+                QMessageBox.warning(self, "Error", "config.json not found")
+                return
+
+            if sys.platform == 'win32':
+                # Method 1: Check common install locations
+                vscode_paths = [
+                    os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
+                    os.path.expandvars(r"%PROGRAMFILES%\Microsoft VS Code\Code.exe"),
+                    os.path.expandvars(r"%USERPROFILE%\AppData\Local\Programs\Microsoft VS Code\Code.exe")
+                ]
+                
+                # Method 2: Check if code is in PATH
+                try:
+                    # First try direct execution
+                    subprocess.Popen(['code', config_path], shell=True)
+                    self.append_console("Opened config.json in VS Code")
+                    return
+                except Exception:
+                    pass
+                    
+                # If direct execution failed, try with full path
+                for vscode_path in vscode_paths:
+                    if os.path.exists(vscode_path):
+                        subprocess.Popen([vscode_path, config_path])
+                        self.append_console("Opened config.json in VS Code")
+                        return
+                
+                # Fallback to Notepad
+                os.system(f'notepad "{config_path}"')
+                self.append_console("Opened config.json in Notepad (VS Code not found)")
+                
+            elif sys.platform == 'darwin':
+                try:
+                    subprocess.Popen(['open', '-a', 'Visual Studio Code', config_path])
+                    self.append_console("Opened config.json in VS Code")
+                except Exception:
+                    subprocess.Popen(['open', '-t', config_path])
+                    self.append_console("Opened config.json in default editor")
+                    
+            else:  # Linux
+                try:
+                    subprocess.Popen(['code', config_path])
+                    self.append_console("Opened config.json in VS Code")
+                except Exception:
+                    subprocess.Popen(['xdg-open', config_path])
+                    self.append_console("Opened config.json in default editor")
+                    
+        except Exception as e:
+            self.append_console(f"Failed to open config: {str(e)}")
+            QMessageBox.warning(self, "Error", f"Could not open config.json:\n{str(e)}")
+
+    def create_node_selection(self):
+        node_layout = QHBoxLayout()
+        
+        node_label = QLabel("Node Version:")
+        self.node_combo = QComboBox()
+        
+        node_layout.addWidget(node_label)
+        node_layout.addWidget(self.node_combo)
+        
+        self.widget_layout.addLayout(node_layout)
+    
+    def create_command_selection(self):
+        command_layout = QHBoxLayout()
+        
+        command_label = QLabel("Run Command:")
+        self.command_combo = QComboBox()
+        self.command_combo.addItems(self.config["RUNNER_COMMANDS"])
+        self.command_combo.setEditable(True)
+        
+        command_layout.addWidget(command_label)
+        command_layout.addWidget(self.command_combo)
+        
+        self.widget_layout.addLayout(command_layout)
+    
+    def create_action_buttons(self):
+        button_layout = QHBoxLayout()
+        
+        # Existing controls
+        self.install_checkbox = QCheckBox("Run npm install before starting")
+        self.install_checkbox.setToolTip("Run 'npm install' or 'yarn install' before starting the project")
+        
+        # Run button group
+        run_button_group = QHBoxLayout()
+        
+        self.run_button = QPushButton("Run Project")
+        self.run_button.setToolTip("Run the selected project in the embedded console")
+        self.run_button.clicked.connect(self.run_project)
+        
+        self.cmd_button = QPushButton("CMD")
+        self.cmd_button.setToolTip("Open external Command Prompt with:\n"
+                                "- Project directory set\n"
+                                "- Correct Node version in PATH\n"
+                                "- Auto-run configured command")
+        self.cmd_button.clicked.connect(self.open_command_prompt)
+        
+        run_button_group.addWidget(self.run_button)
+        run_button_group.addWidget(self.cmd_button)
+        
+        # Stop button
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setToolTip("Stop the currently running project")
+        self.stop_button.setEnabled(False)
+        
+        # Add all to main layout
+        button_layout.addWidget(self.install_checkbox)
+        button_layout.addLayout(run_button_group)
+        button_layout.addWidget(self.stop_button)
+        
+        self.widget_layout.addLayout(button_layout)
+
+    def open_command_prompt(self):
+        """Open external Command Prompt with correct environment and auto-run"""
+        project_dir = self.get_project_path(self.project_combo.currentText())
+        if not project_dir or not os.path.exists(project_dir):
+            self.append_console("Error: Invalid project directory")
+            return
+        
+        node_version = self.node_combo.currentText()
+        nvm_dir = self.config["NVM_DIR"]
+        node_path = os.path.join(nvm_dir, node_version)
+        run_command = self.command_combo.currentText()
+        
+        if sys.platform == 'win32':
+            try:
+                import subprocess
+                commands = [
+                    f'cd /d "{project_dir}"',
+                    f'set PATH={node_path};{nvm_dir};%PATH%',
+                    f'title Frontend Runner - {os.path.basename(project_dir)}',
+                    'echo Configured environment:',
+                    f'echo - Project: {project_dir}',
+                    f'echo - Node: {node_version}',
+                    f'echo - Command: {run_command}',
+                    'echo.',
+                    run_command
+                ]
+                full_command = " && ".join(commands)
+                
+                subprocess.Popen(
+                    f'start cmd /K "{full_command}"',
+                    shell=True
+                )
+                
+                self.append_console(f"Opened Command Prompt at: {project_dir}")
+                
+            except Exception as e:
+                self.append_console(f"Failed to open Command Prompt: {str(e)}")
+                QMessageBox.warning(self, "Error", f"Could not open Command Prompt:\n{str(e)}")
+        else:
+            # Linux/Mac implementation
+            cmd = (
+                f'gnome-terminal --working-directory="{project_dir}" -- bash -c "'
+                f'export PATH={node_path}:{nvm_dir}:$PATH; '
+                f'echo "Configured environment:"; '
+                f'echo "- Project: {project_dir}"; '
+                f'echo "- Node: {node_version}"; '
+                f'echo "- Command: {run_command}"; '
+                f'echo; '
+                f'{run_command}; '
+                f'exec bash"'
+            )
+            try:
+                process = QProcess()
+                process.startDetached('bash', ['-c', cmd])
+            except Exception as e:
+                self.append_console(f"Failed to open terminal: {str(e)}")
+                QMessageBox.warning(self, "Error", f"Could not open terminal:\n{str(e)}")
+
+    def create_console_output(self):
+        console_label = QLabel("Console Output:")
+        self.widget_layout.addWidget(console_label)
+        
+        self.console_output = QTextEdit()
+        self.console_output.setFont(QFont("Courier New", 10))
+        self.console_output.setStyleSheet("""
+            QTextEdit {
+                background-color: black;
+                color: white;
+                border: 1px solid #444;
+                font-family: Consolas, monospace;
+            }
+        """)
+        
+        self.command_input = QLineEdit()
+        self.command_input.setPlaceholderText("Enter custom command and press Enter...")
+        self.command_input.returnPressed.connect(self.execute_custom_command)
+    
+    def browse_project(self):
+        default_dir = self.config["DEFAULT_PROJECT_DIR"]
+        folder = QFileDialog.getExistingDirectory(self, "Select Project Directory", default_dir)
+        if folder:
+            self.project_combo.addItem(folder)
+            self.project_combo.setCurrentText(folder)
+    
+    def load_projects(self):
+        # Load projects from default directory
+        front_dir = self.config["DEFAULT_PROJECT_DIR"]
+        if os.path.exists(front_dir):
+            for item in os.listdir(front_dir):
+                full_path = os.path.join(front_dir, item)
+                if os.path.isdir(full_path):
+                    self.project_combo.addItem(full_path)
+    
+    def load_node_versions(self):
+        # Load node versions from nvm directory
+        nvm_dir = self.config["NVM_DIR"]
+        if os.path.exists(nvm_dir):
+            for item in os.listdir(nvm_dir):
+                if item.startswith("v") and os.path.isdir(os.path.join(nvm_dir, item)):
+                    self.node_combo.addItem(item)
+    
+    def set_node_version(self, version):
+        # Set the PATH environment to use the selected Node version
+        nvm_dir = self.config["NVM_DIR"]
+        node_path = os.path.join(nvm_dir, version)
+        
+        # Get current PATH and remove any existing Node paths
+        current_path = os.environ.get("PATH", "").split(";")
+        filtered_path = [p for p in current_path if not p.startswith(nvm_dir)]
+        
+        # Add the selected Node version to PATH
+        new_path = [node_path, nvm_dir] + filtered_path
+        os.environ["PATH"] = ";".join(new_path)
+        
+        self.append_console(f"Node version set to: {version}")
+    
+    def append_console(self, text):
+        self.console_output.moveCursor(QTextCursor.End)
+        self.console_output.insertPlainText(text + "\n")
+        self.console_output.moveCursor(QTextCursor.End)
+    
+    def run_project(self):
+        ccText = self.get_project_path(self.project_combo.currentText())
+        project_dir = ccText
+        print("currentText : ", self.project_combo.currentText())
+        print("DIRR : ", project_dir)
+        if not project_dir or not os.path.exists(project_dir):
+            self.append_console("Error: Invalid project directory")
+            return
+        
+        # Update status bar with running project name
+        project_name = os.path.basename(project_dir)
+        
+        self.set_node_version(project_dir)
+        
+        # Run npm install if checkbox is checked
+        if self.install_checkbox.isChecked():
+            self.run_npm_install(project_dir)
+            # We'll chain the actual run after install completes
+            return
+        
+        # Proceed with running the project
+        self.execute_run_command(project_dir)
+    
+    def run_npm_install(self, project_dir):
+        self.append_console(f"Running npm install in {project_dir}...")
+        
+        self.process = QProcess()
+        self.process.setWorkingDirectory(project_dir)
+        self.process.readyReadStandardOutput.connect(self.handle_stdout)
+        self.process.readyReadStandardError.connect(self.handle_stderr)
+        self.process.finished.connect(lambda: self.on_install_finished(project_dir))
+        
+        # Determine package manager (check for yarn.lock)
+        if os.path.exists(os.path.join(project_dir, "yarn.lock")):
+            self.process.start("yarn", ["install"])
+        else:
+            self.process.start("npm", ["install"])
+        
+        self.run_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+    
+    def on_install_finished(self, project_dir):
+        self.append_console("npm install completed")
+        self.execute_run_command(project_dir)
+    
+    def execute_run_command(self, project_dir):
+        command = self.command_combo.currentText().strip()
+        if not command:
+            self.append_console("Error: No run command specified")
+            return
+        
+        parts = command.split()
+        program = parts[0]
+        args = parts[1:] if len(parts) > 1 else []
+
+        # Set up environment with correct Node version
+        nvm_dir = self.config["NVM_DIR"]
+        node_version = self.node_combo.currentText()
+        node_path = os.path.join(nvm_dir, node_version)
+        
+        # Get current environment
+        env = QProcessEnvironment.systemEnvironment()
+        
+        # Update PATH - prepend Node version and nvm dir
+        current_path = env.value("PATH", "")
+        new_path = f"{node_path};{nvm_dir};{current_path}"
+        env.insert("PATH", new_path)
+        
+        # Windows-specific: Set NVM_HOME and NVM_SYMLINK if they exist
+        if 'NVM_HOME' in os.environ:
+            env.insert("NVM_HOME", os.environ['NVM_HOME'])
+        if 'NVM_SYMLINK' in os.environ:
+            env.insert("NVM_SYMLINK", os.environ['NVM_SYMLINK'])
+        
+        # Temporarily update os.environ for executable checking
+        old_path = os.environ['PATH']
+        os.environ['PATH'] = new_path
+        
+        # Check if program exists (Windows specific)
+        program_path = self.find_executable(program)
+        if not program_path:
+            self.append_console(f"Error: Cannot find '{program}' in PATH")
+            self.append_console(f"Current PATH: {new_path}")
+            self.append_console("Please ensure:")
+            self.append_console(f"1. Node version {node_version} exists in {nvm_dir}")
+            self.append_console(f"2. {program} is installed (try 'nvm install {node_version}')")
+            os.environ['PATH'] = old_path
+            return
+        
+        os.environ['PATH'] = old_path
+        
+        self.append_console(f"Running command: {command} in {project_dir}...")
+        self.append_console(f"Using Node: {node_version}")
+        self.append_console(f"Using {program}: {program_path}")
+        
+        self.process = QProcess()
+        self.process.setWorkingDirectory(project_dir)
+        self.process.setProcessEnvironment(env)
+        self.process.readyReadStandardOutput.connect(self.handle_stdout)
+        self.process.readyReadStandardError.connect(self.handle_stderr)
+        self.process.finished.connect(self.process_finished)
+        
+        try:
+            # Windows-specific: For yarn/npm, we need to run the .cmd file
+            if program in ['yarn', 'npm'] and not program_path.endswith('.cmd'):
+                program_path = program_path.replace('.exe', '.cmd')
+                if not os.path.exists(program_path):
+                    program_path = os.path.join(node_path, f"{program}.cmd")
+            
+            # Windows-specific: Need to run through cmd.exe for proper environment
+            if program_path.endswith('.cmd'):
+                args = ['/c', program_path] + args
+                program_path = 'cmd.exe'
+            
+            self.append_console(f"Executing: {program_path} {' '.join(args)}")
+            self.process.start(program_path, args)
+            
+            if not self.process.waitForStarted(1000):
+                error = self.process.errorString()
+                self.append_console(f"Failed to start process: {error}")
+                self.append_console("Troubleshooting steps:")
+                self.append_console(f"1. Verify file exists: {program_path}")
+                self.append_console(f"2. Check file permissions")
+                self.append_console(f"3. Try running manually in cmd: {command}")
+                self.process_finished(-1, QProcess.CrashExit)
+                return
+                
+            self.run_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            
+        except Exception as e:
+            self.append_console(f"Error executing command: {str(e)}")
+            self.process_finished(-1, QProcess.CrashExit)
+
+    def find_executable(self, name):
+        """Check if an executable exists in the PATH (Windows specific)"""
+        # Windows executable extensions to check
+        extensions = ['.cmd', '.bat', '.exe', '']
+        
+        paths = os.environ['PATH'].split(os.pathsep)
+        for path in paths:
+            for ext in extensions:
+                full_path = os.path.join(path, name + ext)
+                if os.path.isfile(full_path):
+                    return full_path
+        return None
+
+    def stop_project(self):
+        if self.process and self.process.state() == QProcess.Running:
+            self.append_console("Stopping process...")
+            
+            # First try graceful termination
+            self.process.terminate()
+            
+            # Wait for clean shutdown (5 seconds)
+            if not self.process.waitForFinished(5000):
+                self.append_console("Process not responding - forcing termination...")
+                
+                # Windows-specific: Kill the entire process tree
+                if sys.platform == 'win32':
+                    self.kill_windows_process_tree(self.process.processId())
+                else:
+                    self.process.kill()
+                
+                # Double-check and wait
+                if not self.process.waitForFinished(1000):
+                    self.append_console("Warning: Process might still be running")
+            
+            self.append_console("Process stopped")
+            self.cleanup_after_stop()
+        else:
+            self.append_console("No running process to stop")
+    
+    def closeEvent(self, event):
+        """Handle application closing"""
+        if self.process and self.process.state() == QProcess.Running:
+            reply = QMessageBox.question(
+                self,
+                'Process Running',
+                'A service is still running. Do you want to stop it before exiting?',
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.kill_windows_process_tree(self.process.processId())
+                event.accept()
+            elif reply == QMessageBox.No:
+                event.accept()  # Continue closing without stopping
+            else:
+                event.ignore()  # Cancel closing
+        else:
+            event.accept()
+
+    def kill_windows_process_tree(self, pid):
+        """Forcefully kill a process and all its children on Windows"""
+        try:
+            import psutil
+            parent = psutil.Process(pid)
+            children = parent.children(recursive=True)
+            
+            # Kill all children first
+            for child in children:
+                try:
+                    child.kill()
+                except:
+                    pass
+            
+            # Then kill parent
+            try:
+                parent.kill()
+            except:
+                pass
+            
+            return True
+        except Exception as e:
+            self.append_console(f"Error killing process tree: {str(e)}")
+            # Fallback to taskkill if psutil fails
+            try:
+                import subprocess
+                subprocess.call(['taskkill', '/F', '/T', '/PID', str(pid)])
+                return True
+            except Exception as e:
+                self.append_console(f"Taskkill also failed: {str(e)}")
+                return False
+
+    def cleanup_after_stop(self):
+        """Clean up after process stopped"""
+        self.statusBar().showMessage("Ready")
+        self.running_port = None
+        self.run_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.process = None
+    
+    def execute_custom_command(self):
+        command = self.command_input.text().strip()
+        if not command:
+            return
+        
+        project_dir = self.project_combo.currentText()
+        if not project_dir or not os.path.exists(project_dir):
+            self.append_console("Error: Invalid project directory")
+            return
+        
+        self.append_console(f"Executing custom command: {command}")
+        self.command_input.clear()
+        
+        self.process = QProcess()
+        self.process.setWorkingDirectory(project_dir)
+        self.process.readyReadStandardOutput.connect(self.handle_stdout)
+        self.process.readyReadStandardError.connect(self.handle_stderr)
+        self.process.finished.connect(self.process_finished)
+        
+        # Split command into parts
+        parts = command.split()
+        program = parts[0]
+        args = parts[1:] if len(parts) > 1 else []
+        
+        
+        self.process.start(program, args)
+        
+        self.run_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+    
+    def handle_stdout(self):
+        if self.process:
+            data = self.process.readAllStandardOutput()
+            stream = QTextStream(data)
+            text = stream.readAll()
+            self.process_console_text(text)
+            self.detect_running_port(text)
+
+    def handle_stderr(self):
+        if self.process:
+            data = self.process.readAllStandardError()
+            stream = QTextStream(data)
+            text = stream.readAll()
+            self.process_console_text(text)
+            self.detect_running_port(text)
+
+    def process_console_text(self, text):
+        """Process text with ANSI color codes and append to console"""
+        cursor = self.console_output.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        
+        # Split text into segments with ANSI codes
+        segments = self.split_ansi_segments(text)
+        
+        for segment in segments:
+            if segment.startswith('\x1B['):
+                # ANSI color code - update format
+                self.current_format = self.ansi_to_text_format(segment)
+                cursor.setCharFormat(self.current_format)
+            else:
+                # Normal text - insert with current format
+                cursor.insertText(segment)
+        
+        self.console_output.ensureCursorVisible()
+
+    def split_ansi_segments(self, text):
+        """Split text into segments separated by ANSI codes"""
+        import re
+        return re.split('(\x1B\[[0-?]*[ -/]*[@-~])', text)
+
+    def ansi_to_text_format(self, ansi_code):
+        """Convert ANSI code to QTextCharFormat"""
+        format = QTextCharFormat()
+        
+        # Default to white text
+        format.setForeground(QColor('white'))
+        
+        # Remove ESC[ and final m
+        codes = ansi_code[2:-1].split(';')
+        
+        for code in codes:
+            if not code:
+                continue
+                
+            code = int(code)
+            
+            # Basic colors
+            if code == 0:    # Reset
+                format.setForeground(QColor('white'))
+            elif code == 30: # Black
+                format.setForeground(QColor('black'))
+            elif code == 31: # Red
+                format.setForeground(QColor('red'))
+            elif code == 32: # Green
+                format.setForeground(QColor('green'))
+            elif code == 33: # Yellow
+                format.setForeground(QColor('yellow'))
+            elif code == 34: # Blue
+                format.setForeground(QColor('blue'))
+            elif code == 35: # Magenta
+                format.setForeground(QColor('magenta'))
+            elif code == 36: # Cyan
+                format.setForeground(QColor('cyan'))
+            elif code == 37: # White
+                format.setForeground(QColor('white'))
+                
+            # Bright colors
+            elif code == 90: # Bright Black (Gray)
+                format.setForeground(QColor('gray'))
+            elif code == 91: # Bright Red
+                format.setForeground(QColor(255, 100, 100))  # Lighter red
+            elif code == 92: # Bright Green
+                format.setForeground(QColor(100, 255, 100))  # Lighter green
+            elif code == 93: # Bright Yellow
+                format.setForeground(QColor(255, 255, 100)) # Lighter yellow
+            elif code == 94: # Bright Blue
+                format.setForeground(QColor(100, 100, 255)) # Lighter blue
+            elif code == 95: # Bright Magenta
+                format.setForeground(QColor(255, 100, 255)) # Lighter magenta
+            elif code == 96: # Bright Cyan
+                format.setForeground(QColor(100, 255, 255)) # Lighter cyan
+            elif code == 97: # Bright White
+                format.setForeground(QColor('white'))
+                
+            # Background colors (optional)
+            elif 40 <= code <= 47:  # Standard background colors
+                pass  # Implement if you want background colors
+            elif 100 <= code <= 107: # Bright background colors
+                pass  # Implement if you want background colors
+                
+        return format
+    
+    def detect_running_port(self, text):
+        # Try to find port number in the output
+        port_patterns = [
+            "on port (\d+)",
+            ":\d+",  # Matches :3000, :8080 etc.
+            "port (\d+)",
+            "http://[^:]+:(\d+)"
+        ]
+        
+        for pattern in port_patterns:
+            import re
+            match = re.search(pattern, text)
+            if match:
+                self.running_port = match.group(1) if len(match.groups()) > 0 else match.group(0)
+                project_name = os.path.basename(self.project_combo.currentText())
+                # self.statusBar().showMessage(f"Running: {project_name} (Port: {self.running_port})")
+                break
+    
+    def process_finished(self, exit_code, exit_status):
+        self.append_console(f"Process finished with exit code {exit_code}")
+        self.run_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.process = None
+        self.running_port = None
