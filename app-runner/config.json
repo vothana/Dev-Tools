@@ -1,0 +1,27 @@
+{
+    "NVM_DIR": "D:\\window\\nvm",
+    "DEFAULT_PROJECT_DIR": "D:\\front",
+    "RUNNER_COMMANDS": [
+        "yarn dev",
+        "npm run dev",
+        "npm run serve",
+        "yarn start",
+        "npm start"
+    ],
+    "SERVICES": [
+        {
+            "SERVICE_NAME": "signature-frontend",
+            "SERVICE_DIR": "D:/PROJECTS/digital-trust/front-end/signature-frontend",
+            "NODE_VERSION": "18.20.3",
+            "RUN_COMMAND": "yarn dev",
+            "NPM_INSTALL": false
+        },
+        {
+            "SERVICE_NAME": "signature-frontend-superadmin",
+            "SERVICE_DIR": "D:/PROJECTS/digital-trust/front-end/signature-frontend-superadmin",
+            "NODE_VERSION": "18.20.3",
+            "RUN_COMMAND": "yarn dev",
+            "NPM_INSTALL": false
+        }
+    ]
+}
